@@ -22,6 +22,23 @@ async function loyverse(path, params = {}) {
   return res.json();
 }
 
+// Petición de escritura (POST) a la API de Loyverse
+async function loyversePost(path, body) {
+  const token = process.env.LOYVERSE_TOKEN;
+  if (!token) throw new Error("Falta la variable de entorno LOYVERSE_TOKEN");
+
+  const res = await fetch(`${BASE}/${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Loyverse API ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
 function asJson(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
@@ -176,6 +193,20 @@ export function buildServer() {
     "Lista categorías de productos",
     {},
     async () => asJson(await loyverse("categories"))
+  );
+
+  server.tool(
+    "create_category",
+    "Crea una nueva categoría de productos en Loyverse (operación de ESCRITURA).",
+    {
+      name: z.string().describe("Nombre de la categoría a crear"),
+      color: z
+        .enum(["GREY", "RED", "PINK", "ORANGE", "YELLOW", "GREEN", "BLUE", "PURPLE"])
+        .optional()
+        .describe("Color opcional de la categoría"),
+    },
+    async ({ name, color }) =>
+      asJson(await loyversePost("categories", { name, ...(color ? { color } : {}) }))
   );
 
   return server;
