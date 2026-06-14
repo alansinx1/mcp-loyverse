@@ -43,6 +43,79 @@ function asJson(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// Resumen EXACTO de ventas por tienda en un rango UTC (paginando, neto de devoluciones)
+export async function salesSummary({ created_at_min, created_at_max }) {
+  const storesData = await loyverse("stores");
+  const storeName = {};
+  for (const s of storesData.stores || []) storeName[s.id] = s.name;
+
+  const perStore = {};
+  let totalNet = 0, totalReceipts = 0, totalRefunds = 0;
+  let cursor, pages = 0;
+  do {
+    const params = cursor
+      ? { cursor, limit: 250 }
+      : { created_at_min, limit: 250, ...(created_at_max ? { created_at_max } : {}) };
+    const page = await loyverse("receipts", params);
+    for (const r of page.receipts || []) {
+      const isRefund = r.receipt_type === "REFUND";
+      const sign = isRefund ? -1 : 1;
+      const amt = (r.total_money || 0) * sign;
+      const sid = r.store_id || "desconocida";
+      if (!perStore[sid]) perStore[sid] = { tienda: storeName[sid] || sid, total: 0, recibos: 0, devoluciones: 0 };
+      perStore[sid].total += amt;
+      if (isRefund) { perStore[sid].devoluciones += 1; totalRefunds += 1; }
+      else perStore[sid].recibos += 1;
+      totalNet += amt;
+      totalReceipts += 1;
+    }
+    cursor = page.cursor;
+  } while (cursor && ++pages < 100);
+
+  return {
+    rango: { desde: created_at_min, hasta: created_at_max || "ahora" },
+    total_neto: round2(totalNet),
+    total_recibos: totalReceipts,
+    total_devoluciones: totalRefunds,
+    por_tienda: Object.values(perStore).map((s) => ({ ...s, total: round2(s.total) })),
+  };
+}
+
+// Desplazamiento (ms) de una zona horaria para un instante dado
+function tzOffsetMs(date, tz) {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(date).reduce((a, x) => ((a[x.type] = x.value), a), {});
+  const asUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour === "24" ? 0 : p.hour, p.minute, p.second);
+  return asUTC - date.getTime();
+}
+
+// Instante UTC que corresponde a una hora "de pared" local (dateStr=YYYY-MM-DD)
+function localToUTC(dateStr, timeStr, tz) {
+  const naive = new Date(`${dateStr}T${timeStr}Z`);
+  return new Date(naive.getTime() - tzOffsetMs(naive, tz));
+}
+
+// Límites UTC (min/max) de un día de calendario local
+export function dayBoundsUTC(dateStr, tz = "America/Mexico_City") {
+  return {
+    created_at_min: localToUTC(dateStr, "00:00:00", tz).toISOString(),
+    created_at_max: localToUTC(dateStr, "23:59:59", tz).toISOString(),
+  };
+}
+
+// Fecha de calendario (YYYY-MM-DD) en una zona horaria, desplazada por offsetDays
+export function dateInTZ(tz = "America/Mexico_City", offsetDays = 0) {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date()); // YYYY-MM-DD
+  const [y, m, d] = today.split("-").map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1, d + offsetDays));
+  return shifted.toISOString().slice(0, 10);
+}
+
 // Crea y configura un servidor MCP con las herramientas de Loyverse
 export function buildServer() {
   const server = new McpServer({ name: "loyverse-mcp", version: "1.0.0" });
@@ -73,46 +146,8 @@ export function buildServer() {
       created_at_min: z.string().describe("Inicio del rango en UTC ISO 8601, ej. 2026-06-14T06:00:00Z"),
       created_at_max: z.string().optional().describe("Fin del rango en UTC ISO 8601"),
     },
-    async ({ created_at_min, created_at_max }) => {
-      // Nombres de tiendas
-      const storesData = await loyverse("stores");
-      const storeName = {};
-      for (const s of storesData.stores || []) storeName[s.id] = s.name;
-
-      // Recorre todas las páginas de recibos
-      const perStore = {};
-      let totalNet = 0, totalReceipts = 0, totalRefunds = 0;
-      let cursor;
-      let pages = 0;
-      do {
-        const params = cursor
-          ? { cursor, limit: 250 }
-          : { created_at_min, limit: 250, ...(created_at_max ? { created_at_max } : {}) };
-        const page = await loyverse("receipts", params);
-        for (const r of page.receipts || []) {
-          const isRefund = r.receipt_type === "REFUND";
-          const sign = isRefund ? -1 : 1;
-          const amt = (r.total_money || 0) * sign;
-          const sid = r.store_id || "desconocida";
-          if (!perStore[sid]) perStore[sid] = { tienda: storeName[sid] || sid, total: 0, recibos: 0, devoluciones: 0 };
-          perStore[sid].total += amt;
-          if (isRefund) { perStore[sid].devoluciones += 1; totalRefunds += 1; }
-          else perStore[sid].recibos += 1;
-          totalNet += amt;
-          totalReceipts += 1;
-        }
-        cursor = page.cursor;
-      } while (cursor && ++pages < 100);
-
-      const round = (n) => Math.round(n * 100) / 100;
-      return asJson({
-        rango: { desde: created_at_min, hasta: created_at_max || "ahora" },
-        total_neto: round(totalNet),
-        total_recibos: totalReceipts,
-        total_devoluciones: totalRefunds,
-        por_tienda: Object.values(perStore).map((s) => ({ ...s, total: round(s.total) })),
-      });
-    }
+    async ({ created_at_min, created_at_max }) =>
+      asJson(await salesSummary({ created_at_min, created_at_max }))
   );
 
   server.tool(

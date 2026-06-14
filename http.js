@@ -4,7 +4,7 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { buildServer } from "./server.js";
+import { buildServer, salesSummary, dayBoundsUTC, dateInTZ } from "./server.js";
 
 const PORT = process.env.PORT || 5001;
 const AUTH = process.env.MCP_AUTH_TOKEN; // si está vacío, NO se exige auth (solo para pruebas)
@@ -86,6 +86,32 @@ async function handleMessages(req, res) {
 }
 app.post("/messages", handleMessages);
 app.post("/:token/messages", handleMessages);
+
+// --- Reporte diario en JSON (para n8n / Google Sheets) ---
+// GET /<token>/report/daily?date=YYYY-MM-DD&tz=America/Mexico_City
+// Sin ?date toma AYER (zona horaria indicada). Devuelve una fila por tienda.
+async function handleDaily(req, res) {
+  if (!authOk(req, res)) return;
+  try {
+    const tz = req.query.tz || "America/Mexico_City";
+    const date = req.query.date || dateInTZ(tz, -1); // por defecto: ayer
+    const { created_at_min, created_at_max } = dayBoundsUTC(date, tz);
+    const resumen = await salesSummary({ created_at_min, created_at_max });
+    const filas = resumen.por_tienda.map((s) => ({
+      fecha: date,
+      tienda: s.tienda,
+      total: s.total,
+      recibos: s.recibos,
+      devoluciones: s.devoluciones,
+    }));
+    res.json({ fecha: date, zona_horaria: tz, total_neto: resumen.total_neto, filas });
+  } catch (err) {
+    console.error("Error en /report/daily:", err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+}
+app.get("/report/daily", handleDaily);
+app.get("/:token/report/daily", handleDaily);
 
 // --- Salud (sin auth) ---
 app.get("/health", (_req, res) => res.json({ ok: true }));
