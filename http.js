@@ -1,16 +1,33 @@
 #!/usr/bin/env node
-// Modo HTTP (Streamable HTTP) — para que n8n se conecte por red
+// MCP por HTTP con autenticación. Soporta SSE (n8n) y Streamable HTTP (ChatGPT).
+// Auth: token en la ruta (/<token>/sse) o header "Authorization: Bearer <token>".
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { buildServer } from "./server.js";
 
 const PORT = process.env.PORT || 5001;
+const AUTH = process.env.MCP_AUTH_TOKEN; // si está vacío, NO se exige auth (solo para pruebas)
 const app = express();
 app.use(express.json());
 
-// Endpoint MCP sin estado: cada petición crea su propio transporte
-app.post("/mcp", async (req, res) => {
+// Devuelve true si la petición está autorizada; si no, responde 401 y devuelve false.
+function authOk(req, res) {
+  if (!AUTH) return true; // sin token configurado = abierto (no recomendado en producción)
+  const fromPath = req.params.token;
+  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (fromPath === AUTH || fromHeader === AUTH) return true;
+  res.status(401).json({
+    jsonrpc: "2.0",
+    error: { code: -32001, message: "No autorizado" },
+    id: null,
+  });
+  return false;
+}
+
+// --- Streamable HTTP (ChatGPT) ---
+async function handleMcpPost(req, res) {
+  if (!authOk(req, res)) return;
   try {
     const server = buildServer();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -30,44 +47,51 @@ app.post("/mcp", async (req, res) => {
       });
     }
   }
-});
+}
+app.post("/mcp", handleMcpPost);
+app.post("/:token/mcp", handleMcpPost);
 
-// En modo sin estado no se usan GET/DELETE
 const noStream = (_req, res) =>
-  res.status(405).json({
-    jsonrpc: "2.0",
-    error: { code: -32000, message: "Method not allowed." },
-    id: null,
-  });
+  res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
 app.get("/mcp", noStream);
 app.delete("/mcp", noStream);
+app.get("/:token/mcp", noStream);
+app.delete("/:token/mcp", noStream);
 
-// === Transporte SSE (para n8n MCP Client Tool) ===
+// --- SSE (n8n) ---
 const sseTransports = {};
 
-app.get("/sse", async (_req, res) => {
-  const transport = new SSEServerTransport("/messages", res);
+async function handleSse(req, res) {
+  if (!authOk(req, res)) return;
+  const messagesPath = req.params.token ? `/${req.params.token}/messages` : "/messages";
+  const transport = new SSEServerTransport(messagesPath, res);
   sseTransports[transport.sessionId] = transport;
   res.on("close", () => {
     delete sseTransports[transport.sessionId];
   });
   const server = buildServer();
   await server.connect(transport);
-});
+}
+app.get("/sse", handleSse);
+app.get("/:token/sse", handleSse);
 
-app.post("/messages", async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const transport = sseTransports[sessionId];
+async function handleMessages(req, res) {
+  if (!authOk(req, res)) return;
+  const transport = sseTransports[req.query.sessionId];
   if (transport) {
     await transport.handlePostMessage(req, res, req.body);
   } else {
     res.status(400).send("No hay sesión SSE para ese sessionId");
   }
-});
+}
+app.post("/messages", handleMessages);
+app.post("/:token/messages", handleMessages);
 
-// Chequeo de salud
+// --- Salud (sin auth) ---
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
-  console.error(`loyverse-mcp escuchando en :${PORT}  (SSE: /sse  |  HTTP: /mcp)`);
+  console.error(
+    `loyverse-mcp escuchando en :${PORT}  (auth: ${AUTH ? "ON" : "OFF"})  SSE: /<token>/sse  HTTP: /<token>/mcp`
+  );
 });
