@@ -1,0 +1,95 @@
+{
+  "name": "Bot Telegram - Loyverse",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "11111111-1111-1111-1111-111111111111",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "REEMPLAZA",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $input.first().json.message || {};\nconst text = (msg.text || '').toLowerCase().trim();\nconst chatId = msg.chat?.id;\nconst base = 'https://api.loyverse.com/v1.0';\nlet url, intent;\n\nif (text.includes('venta')) {\n  const now = new Date();\n  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());\n  url = `${base}/receipts?created_at_min=${start.toISOString()}&limit=250`;\n  intent = 'ventas';\n} else if (text.includes('inventario') || text.includes('stock')) {\n  url = `${base}/inventory?limit=250`;\n  intent = 'inventario';\n} else if (text.includes('producto')) {\n  url = `${base}/items?limit=100`;\n  intent = 'productos';\n} else {\n  url = `${base}/stores`;\n  intent = 'ayuda';\n}\n\nreturn [{ json: { url, intent, chatId } }];"
+      },
+      "id": "22222222-2222-2222-2222-222222222222",
+      "name": "Interpretar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "authentication": "genericCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "33333333-3333-3333-3333-333333333333",
+      "name": "Loyverse API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REEMPLAZA",
+          "name": "Loyverse Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const intent = $('Interpretar').first().json.intent;\nconst chatId = $('Interpretar').first().json.chatId;\nconst data = $input.first().json;\nlet respuesta = '';\n\nif (intent === 'ventas') {\n  const r = data.receipts || [];\n  const total = r.reduce((s, x) => s + (x.total_money || 0), 0);\n  respuesta = `\\uD83E\\uDDFE Ventas de hoy\\nRecibos: ${r.length}\\nTotal: $${total.toFixed(2)}`;\n} else if (intent === 'inventario') {\n  const inv = data.inventory_levels || [];\n  const bajos = inv.filter(i => (i.in_stock || 0) <= 5);\n  respuesta = `\\uD83D\\uDCE6 Inventario\\nVariantes: ${inv.length}\\nStock bajo (<=5): ${bajos.length}`;\n} else if (intent === 'productos') {\n  const items = data.items || [];\n  respuesta = `\\uD83D\\uDED2 Productos: ${items.length}\\n` + items.slice(0, 10).map(i => `\\u2022 ${i.item_name}`).join('\\n');\n} else {\n  respuesta = 'Hola \\uD83D\\uDC4B Puedo ayudarte con:\\n\\u2022 ventas - ventas de hoy\\n\\u2022 inventario - stock actual\\n\\u2022 productos - lista de productos';\n}\n\nreturn [{ json: { chatId, respuesta } }];"
+      },
+      "id": "44444444-4444-4444-4444-444444444444",
+      "name": "Formatear",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.respuesta }}",
+        "additionalFields": {}
+      },
+      "id": "55555555-5555-5555-5555-555555555555",
+      "name": "Responder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1120, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "REEMPLAZA",
+          "name": "Telegram bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [[{ "node": "Interpretar", "type": "main", "index": 0 }]]
+    },
+    "Interpretar": {
+      "main": [[{ "node": "Loyverse API", "type": "main", "index": 0 }]]
+    },
+    "Loyverse API": {
+      "main": [[{ "node": "Formatear", "type": "main", "index": 0 }]]
+    },
+    "Formatear": {
+      "main": [[{ "node": "Responder", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {},
+  "active": false
+}

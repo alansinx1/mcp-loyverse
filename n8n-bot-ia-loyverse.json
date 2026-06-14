@@ -1,0 +1,89 @@
+{
+  "name": "Bot IA - Loyverse (MCP)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "aaaaaaaa-0000-0000-0000-000000000001",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "credentials": {
+        "telegramApi": { "id": "REEMPLAZA", "name": "Telegram bot" }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.message.text }}",
+        "options": {
+          "systemMessage": "Eres el asistente de una tienda de boba que usa Loyverse. Responde en español, claro y breve. Usa las herramientas MCP de Loyverse para consultar ventas (recibos), inventario, productos, clientes y tiendas. Cuando te pregunten por ventas de un periodo, calcula las fechas en ISO 8601. Resume los números de forma útil para el dueño del negocio."
+        }
+      },
+      "id": "aaaaaaaa-0000-0000-0000-000000000002",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "model": "claude-sonnet-4-6",
+        "options": {}
+      },
+      "id": "aaaaaaaa-0000-0000-0000-000000000003",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.2,
+      "position": [400, 520],
+      "credentials": {
+        "anthropicApi": { "id": "REEMPLAZA", "name": "Anthropic" }
+      }
+    },
+    {
+      "parameters": {
+        "sseEndpoint": "http://localhost:5001/mcp",
+        "authentication": "none"
+      },
+      "id": "aaaaaaaa-0000-0000-0000-000000000004",
+      "name": "MCP Loyverse",
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1,
+      "position": [640, 520]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.output }}",
+        "additionalFields": {}
+      },
+      "id": "aaaaaaaa-0000-0000-0000-000000000005",
+      "name": "Responder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [820, 300],
+      "credentials": {
+        "telegramApi": { "id": "REEMPLAZA", "name": "Telegram bot" }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "MCP Loyverse": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "AI Agent": {
+      "main": [[{ "node": "Responder", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {},
+  "active": false
+}
