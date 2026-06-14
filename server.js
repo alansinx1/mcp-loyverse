@@ -196,6 +196,65 @@ export function buildServer() {
   );
 
   server.tool(
+    "create_product",
+    "Crea un producto NUEVO en Loyverse (operación de ESCRITURA). Crea un item con una variante y precio fijo.",
+    {
+      name: z.string().describe("Nombre del producto"),
+      price: z.number().nonnegative().describe("Precio de venta"),
+      category_id: z.string().optional().describe("ID de la categoría (de list_categories)"),
+      sku: z.string().optional().describe("SKU/código opcional"),
+    },
+    async ({ name, price, category_id, sku }) =>
+      asJson(
+        await loyversePost("items", {
+          item_name: name,
+          ...(category_id ? { category_id } : {}),
+          track_stock: false,
+          sold_by_weight: false,
+          is_composite: false,
+          variants: [
+            {
+              variant_name: "",
+              ...(sku ? { sku } : {}),
+              default_pricing_type: "FIXED",
+              default_price: price,
+            },
+          ],
+        })
+      )
+  );
+
+  server.tool(
+    "update_product",
+    "Edita un producto EXISTENTE (operación de ESCRITURA). Cambia nombre, precio y/o categoría. Requiere item_id (obtenlo de list_items). Solo modifica los campos que indiques.",
+    {
+      item_id: z.string().describe("ID del producto a editar"),
+      name: z.string().optional().describe("Nuevo nombre"),
+      price: z.number().nonnegative().optional().describe("Nuevo precio"),
+      category_id: z.string().optional().describe("Nueva categoría (ID)"),
+    },
+    async ({ item_id, name, price, category_id }) => {
+      const item = await loyverse(`items/${item_id}`);
+      const newCategory = category_id ?? item.category_id;
+      const body = {
+        id: item.id,
+        item_name: name ?? item.item_name,
+        ...(newCategory != null ? { category_id: newCategory } : {}),
+        track_stock: item.track_stock,
+        sold_by_weight: item.sold_by_weight,
+        is_composite: item.is_composite,
+        variants: (item.variants || []).map((v) => ({
+          variant_id: v.variant_id,
+          sku: v.sku,
+          default_pricing_type: v.default_pricing_type || "FIXED",
+          default_price: price != null ? price : v.default_price,
+        })),
+      };
+      return asJson(await loyversePost("items", body));
+    }
+  );
+
+  server.tool(
     "create_category",
     "Crea una nueva categoría de productos en Loyverse (operación de ESCRITURA).",
     {
