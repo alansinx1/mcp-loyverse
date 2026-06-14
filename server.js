@@ -50,6 +50,104 @@ export function buildServer() {
   );
 
   server.tool(
+    "sales_summary",
+    "Resumen EXACTO de ventas por tienda en un rango de fechas. Suma el total de TODOS los recibos (paginando), neto de devoluciones. USA SIEMPRE esta herramienta para preguntas de '¿cuánto se vendió?' en vez de sumar recibos a mano.",
+    {
+      created_at_min: z.string().describe("Inicio del rango en UTC ISO 8601, ej. 2026-06-14T06:00:00Z"),
+      created_at_max: z.string().optional().describe("Fin del rango en UTC ISO 8601"),
+    },
+    async ({ created_at_min, created_at_max }) => {
+      // Nombres de tiendas
+      const storesData = await loyverse("stores");
+      const storeName = {};
+      for (const s of storesData.stores || []) storeName[s.id] = s.name;
+
+      // Recorre todas las páginas de recibos
+      const perStore = {};
+      let totalNet = 0, totalReceipts = 0, totalRefunds = 0;
+      let cursor;
+      let pages = 0;
+      do {
+        const params = cursor
+          ? { cursor, limit: 250 }
+          : { created_at_min, limit: 250, ...(created_at_max ? { created_at_max } : {}) };
+        const page = await loyverse("receipts", params);
+        for (const r of page.receipts || []) {
+          const isRefund = r.receipt_type === "REFUND";
+          const sign = isRefund ? -1 : 1;
+          const amt = (r.total_money || 0) * sign;
+          const sid = r.store_id || "desconocida";
+          if (!perStore[sid]) perStore[sid] = { tienda: storeName[sid] || sid, total: 0, recibos: 0, devoluciones: 0 };
+          perStore[sid].total += amt;
+          if (isRefund) { perStore[sid].devoluciones += 1; totalRefunds += 1; }
+          else perStore[sid].recibos += 1;
+          totalNet += amt;
+          totalReceipts += 1;
+        }
+        cursor = page.cursor;
+      } while (cursor && ++pages < 100);
+
+      const round = (n) => Math.round(n * 100) / 100;
+      return asJson({
+        rango: { desde: created_at_min, hasta: created_at_max || "ahora" },
+        total_neto: round(totalNet),
+        total_recibos: totalReceipts,
+        total_devoluciones: totalRefunds,
+        por_tienda: Object.values(perStore).map((s) => ({ ...s, total: round(s.total) })),
+      });
+    }
+  );
+
+  server.tool(
+    "sales_by_hour",
+    "Ventas agrupadas por HORA del día, ya convertidas a la zona horaria indicada (por defecto México). Devuelve total y número de recibos por hora, y la hora pico. USA esta herramienta para preguntas de '¿a qué hora se vende más?'.",
+    {
+      created_at_min: z.string().describe("Inicio del rango en UTC ISO 8601"),
+      created_at_max: z.string().optional().describe("Fin del rango en UTC ISO 8601"),
+      timezone: z.string().default("America/Mexico_City").describe("Zona horaria IANA"),
+    },
+    async ({ created_at_min, created_at_max, timezone }) => {
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        hour: "2-digit",
+        hour12: false,
+      });
+
+      const buckets = {}; // hora -> { total, recibos }
+      let cursor, pages = 0;
+      do {
+        const params = cursor
+          ? { cursor, limit: 250 }
+          : { created_at_min, limit: 250, ...(created_at_max ? { created_at_max } : {}) };
+        const page = await loyverse("receipts", params);
+        for (const r of page.receipts || []) {
+          if (r.receipt_type === "REFUND") continue;
+          const when = new Date(r.receipt_date || r.created_at);
+          let h = fmt.format(when); // "14" o "24"
+          if (h === "24") h = "00";
+          if (!buckets[h]) buckets[h] = { total: 0, recibos: 0 };
+          buckets[h].total += r.total_money || 0;
+          buckets[h].recibos += 1;
+        }
+        cursor = page.cursor;
+      } while (cursor && ++pages < 100);
+
+      const round = (n) => Math.round(n * 100) / 100;
+      const por_hora = Object.entries(buckets)
+        .map(([h, v]) => ({ hora: `${h}:00`, total: round(v.total), recibos: v.recibos }))
+        .sort((a, b) => a.hora.localeCompare(b.hora));
+      const pico = por_hora.reduce((max, x) => (x.total > (max?.total ?? -1) ? x : max), null);
+
+      return asJson({
+        rango: { desde: created_at_min, hasta: created_at_max || "ahora" },
+        zona_horaria: timezone,
+        hora_pico: pico,
+        por_hora,
+      });
+    }
+  );
+
+  server.tool(
     "get_inventory",
     "Consulta niveles de inventario por variante y tienda",
     {
