@@ -45,6 +45,10 @@ function asJson(data) {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
+// Tope de seguridad de páginas al paginar recibos (250 recibos/página).
+// 4000 páginas = 1,000,000 de recibos: suficiente para históricos largos.
+const MAX_RECEIPT_PAGES = 4000;
+
 // Resumen EXACTO de ventas por tienda en un rango UTC (paginando, neto de devoluciones)
 export async function salesSummary({ created_at_min, created_at_max }) {
   const storesData = await loyverse("stores");
@@ -72,7 +76,10 @@ export async function salesSummary({ created_at_min, created_at_max }) {
       totalReceipts += 1;
     }
     cursor = page.cursor;
-  } while (cursor && ++pages < 100);
+  } while (cursor && ++pages < MAX_RECEIPT_PAGES);
+
+  // Si todavía queda cursor, alcanzamos el tope: el total está INCOMPLETO.
+  const incompleto = Boolean(cursor);
 
   return {
     rango: { desde: created_at_min, hasta: created_at_max || "ahora" },
@@ -80,6 +87,10 @@ export async function salesSummary({ created_at_min, created_at_max }) {
     total_recibos: totalReceipts,
     total_devoluciones: totalRefunds,
     por_tienda: Object.values(perStore).map((s) => ({ ...s, total: round2(s.total) })),
+    incompleto,
+    ...(incompleto
+      ? { aviso: `Se alcanzó el tope de ${MAX_RECEIPT_PAGES * 250} recibos; el total NO incluye todas las ventas. Acota el rango de fechas.` }
+      : {}),
   };
 }
 
@@ -182,7 +193,9 @@ export function buildServer() {
           buckets[h].recibos += 1;
         }
         cursor = page.cursor;
-      } while (cursor && ++pages < 100);
+      } while (cursor && ++pages < MAX_RECEIPT_PAGES);
+
+      const incompleto = Boolean(cursor);
 
       const round = (n) => Math.round(n * 100) / 100;
       const por_hora = Object.entries(buckets)
@@ -195,6 +208,10 @@ export function buildServer() {
         zona_horaria: timezone,
         hora_pico: pico,
         por_hora,
+        incompleto,
+        ...(incompleto
+          ? { aviso: `Se alcanzó el tope de ${MAX_RECEIPT_PAGES * 250} recibos; los datos NO incluyen todas las ventas. Acota el rango de fechas.` }
+          : {}),
       });
     }
   );
@@ -238,13 +255,17 @@ export function buildServer() {
       price: z.number().nonnegative().describe("Precio de venta"),
       category_id: z.string().optional().describe("ID de la categoría (de list_categories)"),
       sku: z.string().optional().describe("SKU/código opcional"),
+      track_stock: z
+        .boolean()
+        .default(false)
+        .describe("Si true, el producto lleva control de inventario (stock editable con update_inventory)"),
     },
-    async ({ name, price, category_id, sku }) =>
+    async ({ name, price, category_id, sku, track_stock }) =>
       asJson(
         await loyversePost("items", {
           item_name: name,
           ...(category_id ? { category_id } : {}),
-          track_stock: false,
+          track_stock,
           sold_by_weight: false,
           is_composite: false,
           variants: [
@@ -267,15 +288,19 @@ export function buildServer() {
       name: z.string().optional().describe("Nuevo nombre"),
       price: z.number().nonnegative().optional().describe("Nuevo precio"),
       category_id: z.string().optional().describe("Nueva categoría (ID)"),
+      track_stock: z
+        .boolean()
+        .optional()
+        .describe("Activa/desactiva el control de inventario del producto"),
     },
-    async ({ item_id, name, price, category_id }) => {
+    async ({ item_id, name, price, category_id, track_stock }) => {
       const item = await loyverse(`items/${item_id}`);
       const newCategory = category_id ?? item.category_id;
       const body = {
         id: item.id,
         item_name: name ?? item.item_name,
         ...(newCategory != null ? { category_id: newCategory } : {}),
-        track_stock: item.track_stock,
+        track_stock: track_stock ?? item.track_stock,
         sold_by_weight: item.sold_by_weight,
         is_composite: item.is_composite,
         variants: (item.variants || []).map((v) => ({
@@ -301,6 +326,22 @@ export function buildServer() {
     },
     async ({ name, color }) =>
       asJson(await loyversePost("categories", { name, ...(color ? { color } : {}) }))
+  );
+
+  server.tool(
+    "update_inventory",
+    "Ajusta el nivel de inventario (stock) de una variante en una tienda (operación de ESCRITURA). Fija el stock al valor exacto indicado (stock_after). Requiere variant_id (de list_items) y store_id (de list_stores). El producto debe tener track_stock activado.",
+    {
+      variant_id: z.string().describe("ID de la variante (de list_items)"),
+      store_id: z.string().describe("ID de la tienda (de list_stores)"),
+      stock_after: z.number().describe("Cantidad final de stock que debe quedar"),
+    },
+    async ({ variant_id, store_id, stock_after }) =>
+      asJson(
+        await loyversePost("inventory", {
+          inventory_levels: [{ variant_id, store_id, stock_after }],
+        })
+      )
   );
 
   return server;
