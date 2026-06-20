@@ -344,5 +344,67 @@ export function buildServer() {
       )
   );
 
+  server.tool(
+    "resolve_variants",
+    "Devuelve el NOMBRE y SKU de variantes a partir de sus variant_id. Recorre TODO el catálogo paginando (list_items solo trae 250). Úsala para nombrar variantes que list_items no alcanza, p. ej. al leer get_inventory.",
+    {
+      variant_ids: z
+        .array(z.string())
+        .min(1)
+        .describe("Lista de variant_id a resolver (de get_inventory o list_items)"),
+    },
+    async ({ variant_ids }) => {
+      const wanted = new Set(variant_ids);
+      const found = {}; // variant_id -> { nombre, sku }
+      let cursor, pages = 0;
+      do {
+        const params = cursor ? { cursor, limit: 250 } : { limit: 250 };
+        const page = await loyverse("items", params);
+        for (const item of page.items || []) {
+          for (const v of item.variants || []) {
+            if (!wanted.has(v.variant_id)) continue;
+            const vn = (v.variant_name || "").trim();
+            found[v.variant_id] = {
+              nombre: vn ? `${item.item_name} - ${vn}` : item.item_name,
+              sku: v.sku || null,
+            };
+          }
+        }
+        cursor = page.cursor;
+      } while (cursor && Object.keys(found).length < wanted.size && ++pages < MAX_RECEIPT_PAGES);
+
+      const variantes = variant_ids.map((id) => ({
+        variant_id: id,
+        nombre: found[id]?.nombre ?? null,
+        sku: found[id]?.sku ?? null,
+        encontrado: id in found,
+      }));
+      const no_encontrados = variantes.filter((v) => !v.encontrado).map((v) => v.variant_id);
+      return asJson({ variantes, ...(no_encontrados.length ? { no_encontrados } : {}) });
+    }
+  );
+
+  server.tool(
+    "add_stock",
+    "Registra una ENTRADA de inventario: SUMA una cantidad al stock actual de una variante en una tienda (operación de ESCRITURA). Lee el stock actual y lo deja en actual+quantity. Úsala para registrar compras/entradas de insumos. Para FIJAR un valor exacto usa update_inventory. El producto debe tener track_stock activado.",
+    {
+      variant_id: z.string().describe("ID de la variante (de list_items)"),
+      store_id: z.string().describe("ID de la tienda (de list_stores)"),
+      quantity: z.number().describe("Cantidad a SUMAR al stock actual (puede ser negativa para restar)"),
+    },
+    async ({ variant_id, store_id, quantity }) => {
+      const inv = await loyverse("inventory", { variant_ids: variant_id, store_id });
+      const level = (inv.inventory_levels || []).find(
+        (l) => l.variant_id === variant_id && l.store_id === store_id
+      );
+      const actual = level?.in_stock ?? 0;
+      const stock_after = round2(actual + quantity);
+      const result = await loyversePost("inventory", {
+        inventory_levels: [{ variant_id, store_id, stock_after }],
+      });
+      return asJson({ variant_id, store_id, stock_antes: actual, sumado: quantity, stock_despues: stock_after, resultado: result });
+    }
+  );
+
   return server;
 }
